@@ -25,7 +25,7 @@ const FALLBACK_DATA = {
 };
 
 // ============================================================================
-// 1. ฟังก์ชันดึงราคาล่าสุด (Live Prices) - ดึงราคาจริงทั้ง BTC และ ทองคำ
+// 1. ฟังก์ชันดึงราคาล่าสุด (Live Prices) - ใช้ Yahoo Finance ทั้งคู่
 // ============================================================================
 async function getLivePrices() {
     let btcPrice = "N/A";
@@ -38,14 +38,13 @@ async function getLivePrices() {
         });
         const btcData = await btcRes.json();
         
-        // ใช้โครงสร้างเดียวกับทองคำ
         const rawBtcPrice = btcData?.chart?.result?.[0]?.meta?.regularMarketPrice;
         
         if (rawBtcPrice) {
             btcPrice = parseFloat(rawBtcPrice).toLocaleString('en-US', { 
                 style: 'currency', 
                 currency: 'USD',
-                maximumFractionDigits: 0 // BTC ปกติไม่ค่อยโชว์เศษสตางค์ให้รกครับ
+                maximumFractionDigits: 0 
             });
         }
     } catch (error) {
@@ -120,7 +119,6 @@ async function getMarketAnalysis() {
 
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
-    // Schema บังคับโครงสร้าง JSON ของเหรียญ
     const assetSchema = {
       type: Type.OBJECT,
       properties: {
@@ -136,7 +134,6 @@ async function getMarketAnalysis() {
       required: ["score", "reason", "impact", "keywords"]
     };
 
-    // Schema หลัก
     const responseSchema = {
       type: Type.OBJECT,
       properties: {
@@ -201,7 +198,6 @@ export default async function Page() {
   let prices = { btc: "N/A", gold: "N/A" };
   
   try {
-    // โหลดข้อมูลแบบคู่ขนาน (Parallel) เพื่อให้เว็บไวขึ้น
     const [resAnalysis, resPrices] = await Promise.all([
         getMarketAnalysis(),
         getLivePrices()
@@ -213,11 +209,17 @@ export default async function Page() {
     aiData = FALLBACK_DATA; 
   }
 
+  // 🔴 เช็คว่าปัจจุบันเป็นข้อมูล Fallback (Error) หรือไม่
+  const isError = aiData.summary === FALLBACK_DATA.summary;
+  
+  // ⏱️ ถ้า Error ให้รีเฟรชทุกๆ 15 วินาที, ถ้าปกติรีเฟรชทุกๆ 10 นาที (600 วิ)
+  const refreshInterval = isError ? "15" : "600"; 
+
   return (
     <div className="min-h-screen bg-[#050505] text-white font-sans flex flex-col items-center py-12 selection:bg-indigo-500/30">
       
-      {/* รีเฟรชอัตโนมัติทุกๆ 10 นาที */}
-      <meta httpEquiv="refresh" content="600" />
+      {/* 🔄 Dynamic Refresh */}
+      <meta httpEquiv="refresh" content={refreshInterval} />
       
       <div className="max-w-6xl w-full px-4 space-y-10">
     
@@ -228,19 +230,33 @@ export default async function Page() {
             </h1>
             
             <div className="flex items-center gap-3 bg-gray-900/60 px-5 py-2 rounded-full border border-gray-800/80 backdrop-blur-md">
-                <span className={`w-3 h-3 rounded-full ${isCached ? 'bg-gray-600' : 'bg-green-500 animate-ping'}`}></span>
+                {isError ? (
+                    <span className="w-3 h-3 rounded-full bg-red-500 animate-pulse"></span>
+                ) : (
+                    <span className={`w-3 h-3 rounded-full ${isCached ? 'bg-gray-600' : 'bg-green-500 animate-ping'}`}></span>
+                )}
+                
                 <p className="text-sm text-gray-400 font-mono tracking-widest uppercase">
-                    {isCached ? `SYS: CACHED DATA` : `SYS: LIVE SYNC`}
+                    {isError ? 'SYS: AI OFFLINE' : (isCached ? 'SYS: CACHED DATA' : 'SYS: LIVE SYNC')}
                 </p>
             </div>
+
+            {/* 🆕 ปุ่มกด Reload แบบ Manual (จะโชว์เฉพาะตอน AI พัง) */}
+            {isError && (
+                <a href="/" className="mt-4 inline-flex items-center gap-2 bg-red-500/10 text-red-400 border border-red-500/50 hover:bg-red-500/20 hover:text-red-300 px-5 py-2 rounded-full transition-all text-sm font-bold tracking-wider">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                    RECONNECT AI
+                </a>
+            )}
         </div>
 
         {/* ================= 2. SUMMARY BOX ================= */}
-        <div className="bg-gray-900/40 p-6 md:p-8 rounded-[2rem] border border-gray-800/60 backdrop-blur-md text-center max-w-6xl mx-auto shadow-2xl">
-            <p className="text-sm text-indigo-400/80 font-bold tracking-[0.2em] mb-4 uppercase">Market Overview</p>
+        <div className={`p-6 md:p-8 rounded-[2rem] border backdrop-blur-md text-center max-w-6xl mx-auto shadow-2xl transition-colors ${isError ? 'bg-red-950/20 border-red-900/50' : 'bg-gray-900/40 border-gray-800/60'}`}>
+            <p className={`text-sm font-bold tracking-[0.2em] mb-4 uppercase ${isError ? 'text-red-400/80' : 'text-indigo-400/80'}`}>Market Overview</p>
             <p className="text-xl md:text-2xl text-gray-200 leading-relaxed font-medium">
                 "{aiData.summary}"
             </p>
+            {isError && <p className="text-sm text-red-500 mt-4 font-mono animate-pulse">Auto-retrying in 15 seconds...</p>}
         </div>
 
         {/* ================= 3. ASSET CARDS SECTION ================= */}
@@ -314,7 +330,7 @@ export default async function Page() {
 
         {/* ================= 4. FOOTER ================= */}
         <div className="flex flex-col md:flex-row justify-between items-center text-xs md:text-sm text-gray-600 font-mono mt-12 border-t border-gray-800/50 pt-8 gap-4 md:gap-0">
-            <p>DATA SOURCE: CNBC / BINANCE / YAHOO FINANCE</p>
+            <p>DATA SOURCE: CNBC / YAHOO FINANCE</p>
             <p>INTELLIGENCE: GEMINI 2.5 FLASH</p>
         </div>
 
