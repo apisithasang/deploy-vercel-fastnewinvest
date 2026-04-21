@@ -1,13 +1,13 @@
-import * as cheerio from 'cheerio';
 import { GoogleGenAI, Type } from '@google/genai';
 
 // ============================================================================
 //  SYSTEM CONFIGURATION
 // ============================================================================
-export const revalidate = 600; // Cache หน้าเว็บฝั่ง Server 10 นาที (ประหยัดโควต้า API)
+// บังคับให้ Vercel โหลดหน้าเว็บใหม่เสมอ (ป้องกันปัญหา cache หน้า Error สีแดงค้าง)
+export const dynamic = 'force-dynamic'; 
 
 // ============================================================================
-//  LOCAL CACHE MEMORY (ป้องกัน API Rate Limit ตอน Develop)
+//  LOCAL CACHE MEMORY (ป้องกัน API Rate Limit)
 // ============================================================================
 const globalForCache = global as unknown as { 
   marketCache: { data: any; lastFetch: number; } | undefined 
@@ -34,7 +34,7 @@ async function getLivePrices() {
     // 1.1 ดึงราคา BTC จาก Yahoo Finance (BTC-USD)
     try {
         const btcRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD', {
-            next: { revalidate: 60 }
+            cache: 'no-store'
         });
         const btcData = await btcRes.json();
         
@@ -54,7 +54,7 @@ async function getLivePrices() {
     // 1.2 ดึงราคา Gold จาก Yahoo Finance (GC=F)
     try {
         const goldRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', {
-            next: { revalidate: 60 }
+            cache: 'no-store'
         });
         const goldData = await goldRes.json();
         
@@ -77,36 +77,30 @@ async function getLivePrices() {
 // 2. ฟังก์ชันวิเคราะห์ข่าว (AI Sentiment)
 // ============================================================================
 async function getMarketAnalysis() {
-  const CACHE_DURATION = 10 * 60 * 1000;
+  const CACHE_DURATION = 10 * 60 * 1000; // Cache 10 นาที
   const now = Date.now();
   const lastFetch = globalForCache.marketCache?.lastFetch || 0;
 
-  // 1. ตรวจสอบ Cache
+  // 1. ตรวจสอบ Cache ใน Memory
   if (globalForCache.marketCache?.data && (now - lastFetch < CACHE_DURATION)) {
     return { ...globalForCache.marketCache.data, isCached: true };
   }
 
-  // 2. ดึงข่าวจาก CNBC
+  // 2. ดึงข่าวจาก RSS Feed (หลบการโดนบล็อก Vercel IP ได้ดีกว่า)
   let newsData = "";
   try {
-    const response = await fetch('https://www.cnbc.com/world/?region=world', {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
+    const response = await fetch('https://api.rss2json.com/v1/api.json?rss_url=https://cointelegraph.com/rss', {
       cache: 'no-store'
     });
-    if (!response.ok) throw new Error("CNBC Network Error");
     
-    const html = await response.text();
-    const $ = cheerio.load(html);
-    const headlines: string[] = [];
+    if (!response.ok) throw new Error("News Network Error");
     
-    $('.Card-title, .RiverHeadline-title, .LatestNews-headline').each((i, el) => {
-      if (headlines.length < 20) { 
-        const title = $(el).text().trim();
-        if (title) headlines.push(title);
-      }
-    });
-    newsData = headlines.map((t, i) => `${i+1}. ${t}`).join('\n');
+    const data = await response.json();
+    const headlines = data.items ? data.items.map((item: any) => item.title).slice(0, 15) : [];
+    
+    newsData = headlines.map((t: string, i: number) => `${i+1}. ${t}`).join('\n');
   } catch (error) {
+    console.error("News Fetch Error:", error);
     if (globalForCache.marketCache?.data) return { ...globalForCache.marketCache.data, isCached: true };
   }
 
@@ -167,6 +161,7 @@ async function getMarketAnalysis() {
     return { ...aiData, isCached: false };
 
   } catch (error) {
+    console.error("AI Generation Error:", error);
     if (globalForCache.marketCache?.data) return { ...globalForCache.marketCache.data, isCached: true };
     return FALLBACK_DATA;
   }
@@ -330,7 +325,7 @@ export default async function Page() {
 
         {/* ================= 4. FOOTER ================= */}
         <div className="flex flex-col md:flex-row justify-between items-center text-xs md:text-sm text-gray-600 font-mono mt-12 border-t border-gray-800/50 pt-8 gap-4 md:gap-0">
-            <p>DATA SOURCE: CNBC / YAHOO FINANCE</p>
+            <p>DATA SOURCE: COINTELEGRAPH / YAHOO FINANCE</p>
             <p>INTELLIGENCE: GEMINI 2.5 FLASH</p>
         </div>
 
