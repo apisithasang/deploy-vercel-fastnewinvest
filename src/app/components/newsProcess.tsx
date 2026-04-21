@@ -1,87 +1,122 @@
-import { unstable_cache } from 'next/cache';
+import * as cheerio from 'cheerio';
 import { GoogleGenAI, Type } from '@google/genai';
 
 // ============================================================================
 //  SYSTEM CONFIGURATION
 // ============================================================================
-// บังคับให้หน้าเว็บโหลดใหม่ (เพื่อดึงราคาล่าสุดตลอดเวลา) แต่ข้อมูล AI จะถูกแยกไป Cache ต่างหาก
-export const dynamic = 'force-dynamic'; 
+export const revalidate = 600; // Cache หน้าเว็บฝั่ง Server 10 นาที (ประหยัดโควต้า API)
+
+// ============================================================================
+//  LOCAL CACHE MEMORY (ป้องกัน API Rate Limit ตอน Develop)
+// ============================================================================
+const globalForCache = global as unknown as { 
+  marketCache: { data: any; lastFetch: number; } | undefined 
+};
+
+if (!globalForCache.marketCache) {
+  globalForCache.marketCache = { data: null, lastFetch: 0 };
+}
 
 // ข้อมูลสำรอง (Fallback) ในกรณีที่ API มีปัญหา
 const FALLBACK_DATA = {
     btc: { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
     gold: { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
-    summary: "ไม่สามารถเชื่อมต่อกับดึงข้อมูลจาก AI ได้ในขณะนี้ โปรดตรวจสอบการเชื่อมต่อ",
-    timestamp: 0 // ไว้เช็คสถานะ Error
+    summary: "ไม่สามารถเชื่อมต่อกับดึงข้อมูลจาก AI ได้ในขณะนี้ โปรดตรวจสอบการเชื่อมต่อ"
 };
 
 // ============================================================================
-// 1. ฟังก์ชันดึงราคาล่าสุด (Live Prices) - ดึงสดใหม่ทุกครั้ง
+// 1. ฟังก์ชันดึงราคาล่าสุด (Live Prices) - ดึงราคาจริงทั้ง BTC และ ทองคำ
 // ============================================================================
 async function getLivePrices() {
     let btcPrice = "N/A";
     let goldPrice = "N/A";
 
-    // 1.1 ดึงราคา BTC (Yahoo)
     try {
-        const btcRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD', {
-            cache: 'no-store'
-        });
-        const btcData = await btcRes.json();
-        const rawBtcPrice = btcData?.chart?.result?.[0]?.meta?.regularMarketPrice;
-        if (rawBtcPrice) {
-            btcPrice = parseFloat(rawBtcPrice).toLocaleString('en-US', { 
-                style: 'currency', currency: 'USD', maximumFractionDigits: 0 
-            });
-        }
-    } catch (error) {
-        console.error("Yahoo BTC Fetch Error:", error);
-    }
+        // ยิงพร้อมกันแบบ parallel (เร็ว)
+        const [btcRes, goldRes] = await Promise.all([
+            fetch('https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD', {
+                next: { revalidate: 60 }
+            }),
+            fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', {
+                next: { revalidate: 60 }
+            })
+        ]);
 
-    // 1.2 ดึงราคา Gold (Yahoo)
-    try {
-        const goldRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', {
-            cache: 'no-store'
-        });
+        const btcData = await btcRes.json();
         const goldData = await goldRes.json();
-        const rawGoldPrice = goldData?.chart?.result?.[0]?.meta?.regularMarketPrice;
-        if (rawGoldPrice) {
-            goldPrice = parseFloat(rawGoldPrice).toLocaleString('en-US', { 
-                style: 'currency', currency: 'USD' 
+
+        // BTC
+        const btcRaw = btcData?.chart?.result?.[0]?.meta?.regularMarketPrice;
+        if (btcRaw && !isNaN(btcRaw)) {
+            btcPrice = parseFloat(btcRaw).toLocaleString('en-US', {
+                style: 'currency',
+                currency: 'USD'
             });
         }
+
+        // GOLD
+        const goldRaw = goldData?.chart?.result?.[0]?.meta?.regularMarketPrice;
+        if (goldRaw && !isNaN(goldRaw)) {
+            goldPrice = parseFloat(goldRaw).toLocaleString('en-US', {
+                style: 'currency',
+                currency: 'USD'
+            });
+        }
+
     } catch (error) {
-        console.error("Yahoo Gold Fetch Error:", error);
+        console.error("Yahoo Price Fetch Error:", error);
     }
 
     return { btc: btcPrice, gold: goldPrice };
 }
 
 // ============================================================================
-// 2. ฟังก์ชันวิเคราะห์ข่าว (AI Sentiment) - ครอบด้วย unstable_cache ของ Next.js
+// 2. ฟังก์ชันวิเคราะห์ข่าว (AI Sentiment)
 // ============================================================================
-const getCachedMarketAnalysis = unstable_cache(
-  async () => {
-    // 2.1 ดึงข่าวจาก RSS Feed
-    const response = await fetch('https://api.rss2json.com/v1/api.json?rss_url=https://cointelegraph.com/rss', {
-      cache: 'no-store' // ไม่จำข่าวเก่า เพื่อให้เวลา cache 10 นาทีหมด มันไปดึงข่าวใหม่จริงๆ
+async function getMarketAnalysis() {
+  const CACHE_DURATION = 10 * 60 * 1000;
+  const now = Date.now();
+  const lastFetch = globalForCache.marketCache?.lastFetch || 0;
+
+  // 1. ตรวจสอบ Cache
+  if (globalForCache.marketCache?.data && (now - lastFetch < CACHE_DURATION)) {
+    return { ...globalForCache.marketCache.data, isCached: true };
+  }
+
+  // 2. ดึงข่าวจาก CNBC
+  let newsData = "";
+  try {
+    const response = await fetch('https://www.cnbc.com/world/?region=world', {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      cache: 'no-store'
     });
+    if (!response.ok) throw new Error("CNBC Network Error");
     
-    if (!response.ok) throw new Error("News Network Error");
+    const html = await response.text();
+    const $ = cheerio.load(html);
+    const headlines: string[] = [];
     
-    const data = await response.json();
-    // ⚠️ ลดจำนวนข่าวเหลือ 5 ข่าว เพื่อให้ AI คิดเสร็จไวๆ ป้องกัน Vercel Timeout
-    const headlines = data.items ? data.items.map((item: any) => item.title).slice(0, 5) : [];
-    const newsData = headlines.map((t: string, i: number) => `${i+1}. ${t}`).join('\n');
+    $('.Card-title, .RiverHeadline-title, .LatestNews-headline').each((i, el) => {
+      if (headlines.length < 20) { 
+        const title = $(el).text().trim();
+        if (title) headlines.push(title);
+      }
+    });
+    newsData = headlines.map((t, i) => `${i+1}. ${t}`).join('\n');
+  } catch (error) {
+    if (globalForCache.marketCache?.data) return { ...globalForCache.marketCache.data, isCached: true };
+  }
 
-    if (!newsData) throw new Error("No news data");
+  if (!newsData) return FALLBACK_DATA;
 
-    // 2.2 เรียกใช้ Gemini AI
+  // 3. เรียกใช้ Gemini AI
+  try {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
 
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
+    // Schema บังคับโครงสร้าง JSON ของเหรียญ
     const assetSchema = {
       type: Type.OBJECT,
       properties: {
@@ -97,6 +132,7 @@ const getCachedMarketAnalysis = unstable_cache(
       required: ["score", "reason", "impact", "keywords"]
     };
 
+    // Schema หลัก
     const responseSchema = {
       type: Type.OBJECT,
       properties: {
@@ -116,7 +152,7 @@ const getCachedMarketAnalysis = unstable_cache(
     `;
 
     const result = await ai.models.generateContent({
-        model: "gemini-2.5-flash", 
+        model: "gemini-3.1-flash-lite-preview", 
         contents: prompt,
         config: {
             temperature: 0.7,
@@ -126,13 +162,14 @@ const getCachedMarketAnalysis = unstable_cache(
     });
 
     const aiData = JSON.parse(result.text || "{}");
-    
-    // แอบฝังเวลาที่ดึงข้อมูลสำเร็จลงไป เพื่อให้หน้าเว็บรู้ว่าข้อมูลนี้เก่าหรือยัง
-    return { ...aiData, timestamp: Date.now() }; 
-  },
-  ['ai-market-analysis-cache'], // ชื่อลิ้นชักที่ Vercel จะใช้เก็บข้อมูลนี้
-  { revalidate: 600 } // อายุของลิ้นชักนี้คือ 10 นาที (600 วินาที)
-);
+    globalForCache.marketCache = { data: aiData, lastFetch: Date.now() };
+    return { ...aiData, isCached: false };
+
+  } catch (error) {
+    if (globalForCache.marketCache?.data) return { ...globalForCache.marketCache.data, isCached: true };
+    return FALLBACK_DATA;
+  }
+}
 
 // ============================================================================
 //  3. HELPER FUNCTIONS FOR UI
@@ -156,37 +193,27 @@ const getImpactBadge = (impact: string) => {
 // ============================================================================
 export default async function Page() {
   let aiData;
+  let isCached = false;
   let prices = { btc: "N/A", gold: "N/A" };
   
   try {
-    // โหลดข้อมูลแบบคู่ขนาน: ราคาดึงสดใหม่เสมอ ส่วน AI จะใช้ข้อมูลใน Cache ถ้ายังไม่หมดอายุ
+    // โหลดข้อมูลแบบคู่ขนาน (Parallel) เพื่อให้เว็บไวขึ้น
     const [resAnalysis, resPrices] = await Promise.all([
-        getCachedMarketAnalysis().catch((e) => {
-           console.error("AI Cache Failed:", e);
-           return FALLBACK_DATA; 
-        }),
+        getMarketAnalysis(),
         getLivePrices()
     ]);
-    aiData = resAnalysis;
+    aiData = resAnalysis || FALLBACK_DATA;
+    isCached = aiData?.isCached || false;
     prices = resPrices;
   } catch (e) { 
     aiData = FALLBACK_DATA; 
   }
 
-  // 🔴 เช็คสถานะ Error และอายุของ Cache
-  const isError = aiData.summary === FALLBACK_DATA.summary;
-  
-  // เช็คว่าข้อมูล AI อายุเกิน 30 วินาทีหรือยัง (ถ้าเกินแปลว่ามาจาก Cache 100%)
-  const isCached = aiData.timestamp ? (Date.now() - aiData.timestamp > 30000) : false; 
-  
-  // ⏱️ ถ้า Error ให้รีเฟรชทุกๆ 15 วินาที, ถ้าปกติรีเฟรชทุกๆ 10 นาที (600 วิ)
-  const refreshInterval = isError ? "15" : "600"; 
-
   return (
     <div className="min-h-screen bg-[#050505] text-white font-sans flex flex-col items-center py-12 selection:bg-indigo-500/30">
       
-      {/* 🔄 Dynamic Refresh */}
-      <meta httpEquiv="refresh" content={refreshInterval} />
+      {/* รีเฟรชอัตโนมัติทุกๆ 10 นาที */}
+      <meta httpEquiv="refresh" content="600" />
       
       <div className="max-w-6xl w-full px-4 space-y-10">
     
@@ -197,33 +224,19 @@ export default async function Page() {
             </h1>
             
             <div className="flex items-center gap-3 bg-gray-900/60 px-5 py-2 rounded-full border border-gray-800/80 backdrop-blur-md">
-                {isError ? (
-                    <span className="w-3 h-3 rounded-full bg-red-500 animate-pulse"></span>
-                ) : (
-                    <span className={`w-3 h-3 rounded-full ${isCached ? 'bg-gray-600' : 'bg-green-500 animate-ping'}`}></span>
-                )}
-                
+                <span className={`w-3 h-3 rounded-full ${isCached ? 'bg-gray-600' : 'bg-green-500 animate-ping'}`}></span>
                 <p className="text-sm text-gray-400 font-mono tracking-widest uppercase">
-                    {isError ? 'SYS: AI OFFLINE' : (isCached ? 'SYS: AI CACHED' : 'SYS: LIVE AI SYNC')}
+                    {isCached ? `SYS: CACHED DATA` : `SYS: LIVE SYNC`}
                 </p>
             </div>
-
-            {/* 🆕 ปุ่มกด Reload แบบ Manual (จะโชว์เฉพาะตอน AI พัง) */}
-            {isError && (
-                <a href="/" className="mt-4 inline-flex items-center gap-2 bg-red-500/10 text-red-400 border border-red-500/50 hover:bg-red-500/20 hover:text-red-300 px-5 py-2 rounded-full transition-all text-sm font-bold tracking-wider">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-                    RECONNECT AI
-                </a>
-            )}
         </div>
 
         {/* ================= 2. SUMMARY BOX ================= */}
-        <div className={`p-6 md:p-8 rounded-[2rem] border backdrop-blur-md text-center max-w-6xl mx-auto shadow-2xl transition-colors ${isError ? 'bg-red-950/20 border-red-900/50' : 'bg-gray-900/40 border-gray-800/60'}`}>
-            <p className={`text-sm font-bold tracking-[0.2em] mb-4 uppercase ${isError ? 'text-red-400/80' : 'text-indigo-400/80'}`}>Market Overview</p>
+        <div className="bg-gray-900/40 p-6 md:p-8 rounded-[2rem] border border-gray-800/60 backdrop-blur-md text-center max-w-6xl mx-auto shadow-2xl">
+            <p className="text-sm text-indigo-400/80 font-bold tracking-[0.2em] mb-4 uppercase">Market Overview</p>
             <p className="text-xl md:text-2xl text-gray-200 leading-relaxed font-medium">
                 "{aiData.summary}"
             </p>
-            {isError && <p className="text-sm text-red-500 mt-4 font-mono animate-pulse">Auto-retrying in 15 seconds...</p>}
         </div>
 
         {/* ================= 3. ASSET CARDS SECTION ================= */}
@@ -297,8 +310,8 @@ export default async function Page() {
 
         {/* ================= 4. FOOTER ================= */}
         <div className="flex flex-col md:flex-row justify-between items-center text-xs md:text-sm text-gray-600 font-mono mt-12 border-t border-gray-800/50 pt-8 gap-4 md:gap-0">
-            <p>DATA SOURCE: COINTELEGRAPH / YAHOO FINANCE</p>
-            <p>INTELLIGENCE: GEMINI 2.5 FLASH</p>
+            <p>DATA SOURCE: CNBC / BINANCE / YAHOO FINANCE</p>
+            <p>INTELLIGENCE: GEMINI 3.1 FLASH LITE</p>
         </div>
 
       </div>
