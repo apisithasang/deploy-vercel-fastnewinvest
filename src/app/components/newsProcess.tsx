@@ -31,42 +31,30 @@ async function getLivePrices() {
     let btcPrice = "N/A";
     let goldPrice = "N/A";
 
-    // 1.1 BTC Price Logic
+    // 1.1 ดึงราคา BTC จาก Binance API (Public)
     try {
         const btcRes = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT', { 
-            next: { revalidate: 60 } 
+            next: { revalidate: 60 } // อัปเดตฝั่ง Server ทุกๆ 60 วินาที
         });
         const btcData = await btcRes.json();
-        
-        // ตรวจสอบว่ามี field price จริงไหมก่อน parse
-        if (btcData && btcData.price) {
-            btcPrice = parseFloat(btcData.price).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-        } else {
-            console.error("Binance API Error:", btcData);
-            btcPrice = "Connection Error"; 
-        }
+        btcPrice = parseFloat(btcData.price).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
     } catch (error) {
         console.error("BTC Price Fetch Error:", error);
     }
 
-    // 1.2 Gold Price Logic
+    // 1.2 ดึงราคา Gold (GC=F คือ Gold Futures) จาก Yahoo Finance API (Public)
     try {
         const goldRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', {
-            next: { revalidate: 60 }
+            next: { revalidate: 60 } // อัปเดตฝั่ง Server ทุกๆ 60 วินาที
         });
         const goldData = await goldRes.json();
         
-        // ใช้ Optional Chaining (?.) เพื่อป้องกัน Error จากโครงสร้าง JSON ที่ซับซ้อน
-        const rawGoldPrice = goldData?.chart?.result?.[0]?.meta?.regularMarketPrice;
-        
-        if (rawGoldPrice) {
-            goldPrice = parseFloat(rawGoldPrice).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-        } else {
-            goldPrice = "Market Closed/Error";
-        }
+        // เข้าถึงข้อมูลราคาล่าสุดในโครงสร้าง JSON ของ Yahoo
+        const rawGoldPrice = goldData.chart.result[0].meta.regularMarketPrice;
+        goldPrice = parseFloat(rawGoldPrice).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
     } catch (error) {
         console.error("Gold Price Fetch Error:", error);
-        goldPrice = "Fetch Failed";
+        goldPrice = "Error Fetching"; // แจ้งเตือนถ้าดึงข้อมูลไม่สำเร็จ
     }
 
     return { btc: btcPrice, gold: goldPrice };
