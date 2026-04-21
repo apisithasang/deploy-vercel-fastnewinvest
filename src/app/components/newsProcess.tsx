@@ -1,69 +1,53 @@
+import { unstable_cache } from 'next/cache';
 import { GoogleGenAI, Type } from '@google/genai';
 
 // ============================================================================
 //  SYSTEM CONFIGURATION
 // ============================================================================
-// บังคับให้ Vercel โหลดหน้าเว็บใหม่เสมอ (ป้องกันปัญหา cache หน้า Error สีแดงค้าง)
+// บังคับให้หน้าเว็บโหลดใหม่ (เพื่อดึงราคาล่าสุดตลอดเวลา) แต่ข้อมูล AI จะถูกแยกไป Cache ต่างหาก
 export const dynamic = 'force-dynamic'; 
-
-// ============================================================================
-//  LOCAL CACHE MEMORY (ป้องกัน API Rate Limit)
-// ============================================================================
-const globalForCache = global as unknown as { 
-  marketCache: { data: any; lastFetch: number; } | undefined 
-};
-
-if (!globalForCache.marketCache) {
-  globalForCache.marketCache = { data: null, lastFetch: 0 };
-}
 
 // ข้อมูลสำรอง (Fallback) ในกรณีที่ API มีปัญหา
 const FALLBACK_DATA = {
     btc: { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
     gold: { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
-    summary: "ไม่สามารถเชื่อมต่อกับดึงข้อมูลจาก AI ได้ในขณะนี้ โปรดตรวจสอบการเชื่อมต่อ"
+    summary: "ไม่สามารถเชื่อมต่อกับดึงข้อมูลจาก AI ได้ในขณะนี้ โปรดตรวจสอบการเชื่อมต่อ",
+    timestamp: 0 // ไว้เช็คสถานะ Error
 };
 
 // ============================================================================
-// 1. ฟังก์ชันดึงราคาล่าสุด (Live Prices) - ใช้ Yahoo Finance ทั้งคู่
+// 1. ฟังก์ชันดึงราคาล่าสุด (Live Prices) - ดึงสดใหม่ทุกครั้ง
 // ============================================================================
 async function getLivePrices() {
     let btcPrice = "N/A";
     let goldPrice = "N/A";
 
-    // 1.1 ดึงราคา BTC จาก Yahoo Finance (BTC-USD)
+    // 1.1 ดึงราคา BTC (Yahoo)
     try {
         const btcRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD', {
             cache: 'no-store'
         });
         const btcData = await btcRes.json();
-        
         const rawBtcPrice = btcData?.chart?.result?.[0]?.meta?.regularMarketPrice;
-        
         if (rawBtcPrice) {
             btcPrice = parseFloat(rawBtcPrice).toLocaleString('en-US', { 
-                style: 'currency', 
-                currency: 'USD',
-                maximumFractionDigits: 0 
+                style: 'currency', currency: 'USD', maximumFractionDigits: 0 
             });
         }
     } catch (error) {
         console.error("Yahoo BTC Fetch Error:", error);
     }
 
-    // 1.2 ดึงราคา Gold จาก Yahoo Finance (GC=F)
+    // 1.2 ดึงราคา Gold (Yahoo)
     try {
         const goldRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', {
             cache: 'no-store'
         });
         const goldData = await goldRes.json();
-        
         const rawGoldPrice = goldData?.chart?.result?.[0]?.meta?.regularMarketPrice;
-        
         if (rawGoldPrice) {
             goldPrice = parseFloat(rawGoldPrice).toLocaleString('en-US', { 
-                style: 'currency', 
-                currency: 'USD' 
+                style: 'currency', currency: 'USD' 
             });
         }
     } catch (error) {
@@ -74,40 +58,25 @@ async function getLivePrices() {
 }
 
 // ============================================================================
-// 2. ฟังก์ชันวิเคราะห์ข่าว (AI Sentiment)
+// 2. ฟังก์ชันวิเคราะห์ข่าว (AI Sentiment) - ครอบด้วย unstable_cache ของ Next.js
 // ============================================================================
-async function getMarketAnalysis() {
-  const CACHE_DURATION = 10 * 60 * 1000; // Cache 10 นาที
-  const now = Date.now();
-  const lastFetch = globalForCache.marketCache?.lastFetch || 0;
-
-  // 1. ตรวจสอบ Cache ใน Memory
-  if (globalForCache.marketCache?.data && (now - lastFetch < CACHE_DURATION)) {
-    return { ...globalForCache.marketCache.data, isCached: true };
-  }
-
-  // 2. ดึงข่าวจาก RSS Feed (หลบการโดนบล็อก Vercel IP ได้ดีกว่า)
-  let newsData = "";
-  try {
+const getCachedMarketAnalysis = unstable_cache(
+  async () => {
+    // 2.1 ดึงข่าวจาก RSS Feed
     const response = await fetch('https://api.rss2json.com/v1/api.json?rss_url=https://cointelegraph.com/rss', {
-      cache: 'no-store'
+      cache: 'no-store' // ไม่จำข่าวเก่า เพื่อให้เวลา cache 10 นาทีหมด มันไปดึงข่าวใหม่จริงๆ
     });
     
     if (!response.ok) throw new Error("News Network Error");
     
     const data = await response.json();
-    const headlines = data.items ? data.items.map((item: any) => item.title).slice(0, 15) : [];
-    
-    newsData = headlines.map((t: string, i: number) => `${i+1}. ${t}`).join('\n');
-  } catch (error) {
-    console.error("News Fetch Error:", error);
-    if (globalForCache.marketCache?.data) return { ...globalForCache.marketCache.data, isCached: true };
-  }
+    // ⚠️ ลดจำนวนข่าวเหลือ 5 ข่าว เพื่อให้ AI คิดเสร็จไวๆ ป้องกัน Vercel Timeout
+    const headlines = data.items ? data.items.map((item: any) => item.title).slice(0, 5) : [];
+    const newsData = headlines.map((t: string, i: number) => `${i+1}. ${t}`).join('\n');
 
-  if (!newsData) return FALLBACK_DATA;
+    if (!newsData) throw new Error("No news data");
 
-  // 3. เรียกใช้ Gemini AI
-  try {
+    // 2.2 เรียกใช้ Gemini AI
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
 
@@ -157,15 +126,13 @@ async function getMarketAnalysis() {
     });
 
     const aiData = JSON.parse(result.text || "{}");
-    globalForCache.marketCache = { data: aiData, lastFetch: Date.now() };
-    return { ...aiData, isCached: false };
-
-  } catch (error) {
-    console.error("AI Generation Error:", error);
-    if (globalForCache.marketCache?.data) return { ...globalForCache.marketCache.data, isCached: true };
-    return FALLBACK_DATA;
-  }
-}
+    
+    // แอบฝังเวลาที่ดึงข้อมูลสำเร็จลงไป เพื่อให้หน้าเว็บรู้ว่าข้อมูลนี้เก่าหรือยัง
+    return { ...aiData, timestamp: Date.now() }; 
+  },
+  ['ai-market-analysis-cache'], // ชื่อลิ้นชักที่ Vercel จะใช้เก็บข้อมูลนี้
+  { revalidate: 600 } // อายุของลิ้นชักนี้คือ 10 นาที (600 วินาที)
+);
 
 // ============================================================================
 //  3. HELPER FUNCTIONS FOR UI
@@ -189,23 +156,28 @@ const getImpactBadge = (impact: string) => {
 // ============================================================================
 export default async function Page() {
   let aiData;
-  let isCached = false;
   let prices = { btc: "N/A", gold: "N/A" };
   
   try {
+    // โหลดข้อมูลแบบคู่ขนาน: ราคาดึงสดใหม่เสมอ ส่วน AI จะใช้ข้อมูลใน Cache ถ้ายังไม่หมดอายุ
     const [resAnalysis, resPrices] = await Promise.all([
-        getMarketAnalysis(),
+        getCachedMarketAnalysis().catch((e) => {
+           console.error("AI Cache Failed:", e);
+           return FALLBACK_DATA; 
+        }),
         getLivePrices()
     ]);
-    aiData = resAnalysis || FALLBACK_DATA;
-    isCached = aiData?.isCached || false;
+    aiData = resAnalysis;
     prices = resPrices;
   } catch (e) { 
     aiData = FALLBACK_DATA; 
   }
 
-  // 🔴 เช็คว่าปัจจุบันเป็นข้อมูล Fallback (Error) หรือไม่
+  // 🔴 เช็คสถานะ Error และอายุของ Cache
   const isError = aiData.summary === FALLBACK_DATA.summary;
+  
+  // เช็คว่าข้อมูล AI อายุเกิน 30 วินาทีหรือยัง (ถ้าเกินแปลว่ามาจาก Cache 100%)
+  const isCached = aiData.timestamp ? (Date.now() - aiData.timestamp > 30000) : false; 
   
   // ⏱️ ถ้า Error ให้รีเฟรชทุกๆ 15 วินาที, ถ้าปกติรีเฟรชทุกๆ 10 นาที (600 วิ)
   const refreshInterval = isError ? "15" : "600"; 
@@ -232,7 +204,7 @@ export default async function Page() {
                 )}
                 
                 <p className="text-sm text-gray-400 font-mono tracking-widest uppercase">
-                    {isError ? 'SYS: AI OFFLINE' : (isCached ? 'SYS: CACHED DATA' : 'SYS: LIVE SYNC')}
+                    {isError ? 'SYS: AI OFFLINE' : (isCached ? 'SYS: AI CACHED' : 'SYS: LIVE AI SYNC')}
                 </p>
             </div>
 
