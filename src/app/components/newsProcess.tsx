@@ -107,7 +107,11 @@ async function getMarketAnalysis() {
     if (globalForCache.marketCache?.data) return { ...globalForCache.marketCache.data, isCached: true };
   }
 
-  if (!newsData) return FALLBACK_DATA;
+    if (!newsData || newsData.trim().length < 20) {
+        if (globalForCache.marketCache?.data)
+            return { ...globalForCache.marketCache.data, isCached: true };
+        return FALLBACK_DATA;
+    }
 
   // 3. เรียกใช้ Gemini AI
   try {
@@ -151,17 +155,28 @@ async function getMarketAnalysis() {
       Headlines: \n${newsData}
     `;
 
-    const result = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite-preview", 
-        contents: prompt,
-        config: {
-            temperature: 0.7,
-            responseMimeType: "application/json",
-            responseSchema: responseSchema,
-        }
-    });
+      const callGemini = async (retries = 2): Promise<any> => {
+          try {
+              const result = await ai.models.generateContent({
+                  model: "gemini-3.1-flash-lite-preview",
+                  contents: prompt,
+                  config: {
+                      temperature: 0.7,
+                      responseMimeType: "application/json",
+                      responseSchema: responseSchema,
+                  }
+              });
+              return JSON.parse(result.text || "{}");
+          } catch (err: any) {
+              if (retries > 0) {
+                  await new Promise(r => setTimeout(r, 1500)); // รอ 1.5 วิ
+                  return callGemini(retries - 1);              // ลองใหม่
+              }
+              throw err;
+          }
+      };
 
-    const aiData = JSON.parse(result.text || "{}");
+    const aiData = await callGemini();
     globalForCache.marketCache = { data: aiData, lastFetch: Date.now() };
     return { ...aiData, isCached: false };
 
