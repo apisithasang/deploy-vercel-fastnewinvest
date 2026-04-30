@@ -19,55 +19,57 @@ if (!globalForCache.marketCache) {
 
 // ข้อมูลสำรอง (Fallback) ในกรณีที่ API มีปัญหา
 const FALLBACK_DATA = {
-    btc: { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
-    gold: { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
-    summary: "ไม่สามารถเชื่อมต่อกับดึงข้อมูลจาก AI ได้ในขณะนี้ โปรดตรวจสอบการเชื่อมต่อ"
+    btc:    { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
+    gold:   { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
+    oil:    { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
+    silver: { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
+    sp500:  { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
+    eurusd:  { score: 5, reason: "ระบบ AI ขัดข้อง กำลังพยายามเชื่อมต่อใหม่...", impact: "LOW", keywords: ["#Offline"] },
+    summary: "ไม่สามารถเชื่อมต่อกับ AI ได้ในขณะนี้"
 };
 
 // ============================================================================
-// 1. ฟังก์ชันดึงราคาล่าสุด (Live Prices) - ดึงราคาจริงทั้ง BTC และ ทองคำ
+// 1. ฟังก์ชันดึงราคาล่าสุด (Live Prices) - ดึงราคาจริง สินทรัพย์ทั้งหมด
 // ============================================================================
 async function getLivePrices() {
-    let btcPrice = "N/A";
-    let goldPrice = "N/A";
+    let btcPrice    = "N/A";
+    let goldPrice   = "N/A";
+    let oilPrice    = "N/A";
+    let silverPrice = "N/A";
+    let sp500Price  = "N/A";
+    let eurUsdPrice = "N/A";
 
     try {
-        // ยิงพร้อมกันแบบ parallel (เร็ว)
-        const [btcRes, goldRes] = await Promise.all([
-            fetch('https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD', {
-                next: { revalidate: 60 }
-            }),
-            fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', {
-                next: { revalidate: 60 }
-            })
+        const [btcRes, goldRes, oilRes, silverRes, sp500Res, eurUsdRes] = await Promise.all([
+            fetch('https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD',  { next: { revalidate: 60 } }),
+            fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F',     { next: { revalidate: 60 } }),
+            fetch('https://query1.finance.yahoo.com/v8/finance/chart/CL=F',     { next: { revalidate: 60 } }),
+            fetch('https://query1.finance.yahoo.com/v8/finance/chart/SI=F',     { next: { revalidate: 60 } }),
+            fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC',  { next: { revalidate: 60 } }),
+            fetch('https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X', { next: { revalidate: 60 } }),
         ]);
 
-        const btcData = await btcRes.json();
-        const goldData = await goldRes.json();
+        const [btcData, goldData, oilData, silverData, sp500Data, eurUsdData] = await Promise.all([
+            btcRes.json(), goldRes.json(), oilRes.json(),
+            silverRes.json(), sp500Res.json(), eurUsdRes.json()
+        ]);
 
-        // BTC
-        const btcRaw = btcData?.chart?.result?.[0]?.meta?.regularMarketPrice;
-        if (btcRaw && !isNaN(btcRaw)) {
-            btcPrice = parseFloat(btcRaw).toLocaleString('en-US', {
-                style: 'currency',
-                currency: 'USD'
-            });
-        }
+        const fmt = (raw: any) => raw && !isNaN(raw)
+            ? parseFloat(raw).toLocaleString('en-US', { style: 'currency', currency: 'USD' })
+            : "N/A";
 
-        // GOLD
-        const goldRaw = goldData?.chart?.result?.[0]?.meta?.regularMarketPrice;
-        if (goldRaw && !isNaN(goldRaw)) {
-            goldPrice = parseFloat(goldRaw).toLocaleString('en-US', {
-                style: 'currency',
-                currency: 'USD'
-            });
-        }
+        btcPrice    = fmt(btcData?.chart?.result?.[0]?.meta?.regularMarketPrice);
+        goldPrice   = fmt(goldData?.chart?.result?.[0]?.meta?.regularMarketPrice);
+        oilPrice    = fmt(oilData?.chart?.result?.[0]?.meta?.regularMarketPrice);
+        silverPrice = fmt(silverData?.chart?.result?.[0]?.meta?.regularMarketPrice);
+        sp500Price  = fmt(sp500Data?.chart?.result?.[0]?.meta?.regularMarketPrice);
+        eurUsdPrice = fmt(eurUsdData?.chart?.result?.[0]?.meta?.regularMarketPrice);
 
     } catch (error) {
         console.error("Yahoo Price Fetch Error:", error);
     }
 
-    return { btc: btcPrice, gold: goldPrice };
+    return { btc: btcPrice, gold: goldPrice, oil: oilPrice, silver: silverPrice, sp500: sp500Price, eurusd: eurUsdPrice };
 }
 
 // ============================================================================
@@ -137,28 +139,34 @@ async function getMarketAnalysis() {
     };
 
     // Schema หลัก
+    // responseSchema — เพิ่ม oil, silver, sp500
     const responseSchema = {
-      type: Type.OBJECT,
-      properties: {
-        btc: assetSchema,
-        gold: assetSchema,
-        summary: { type: Type.STRING, description: "1 sentence overall summary" }
-      },
-      required: ["btc", "gold", "summary"]
+        type: Type.OBJECT,
+        properties: {
+            btc:    assetSchema,
+            gold:   assetSchema,
+            oil:    assetSchema,
+            silver: assetSchema,
+            sp500:  assetSchema,
+            eurusd: assetSchema,
+            summary: { type: Type.STRING, description: "1 sentence overall summary" }
+        },
+        required: ["btc", "gold", "oil", "silver", "sp500", "eurusd", "summary"]
     };
-
+    // prompt ที่สั่ง AI
     const prompt = `
-      Analyze these headlines for market sentiment (Bitcoin & Gold).
-      Score 1-10 (1=Bearish, 5=Neutral, 10=Bullish). 
-      Assess the impact level (HIGH, MEDIUM, LOW) and extract 2-3 key hashtags.
-      Translate reasons and summary to Thai.
-      Headlines: \n${newsData}
+        Analyze these headlines for market sentiment 
+        (Bitcoin, Gold, Crude Oil, Silver, S&P 500, EUR/USD).
+        Score 1-10 (1=Bearish, 5=Neutral, 10=Bullish).
+        Assess impact level (HIGH, MEDIUM, LOW) and extract 2-3 key hashtags per asset.
+        Translate reasons and summary to Thai.
+        Headlines: \n${newsData}
     `;
 
       const callGemini = async (retries = 2): Promise<any> => {
           try {
               const result = await ai.models.generateContent({
-                  model: "gemini-3.1-flash-lite-preview",
+                  model: "gemini-2.5-flash-lite",
                   contents: prompt,
                   config: {
                       temperature: 0.7,
@@ -209,7 +217,7 @@ const getImpactBadge = (impact: string) => {
 export default async function Page() {
   let aiData;
   let isCached = false;
-  let prices = { btc: "N/A", gold: "N/A" };
+  let prices = { btc: "N/A", gold: "N/A", oil: "N/A", silver: "N/A", sp500: "N/A", eurusd: "N/A" };
   
   try {
     // โหลดข้อมูลแบบคู่ขนาน (Parallel) เพื่อให้เว็บไวขึ้น
@@ -230,7 +238,7 @@ export default async function Page() {
       {/* รีเฟรชอัตโนมัติทุกๆ 10 นาที */}
       <meta httpEquiv="refresh" content="600" />
       
-      <div className="max-w-6xl w-full px-4 space-y-10">
+      <div className="max-w-7xl w-full px-7 space-y-10">
     
         {/* ================= 1. HEADER TITLE ================= */}
         <div className="flex flex-col items-center text-center space-y-4 mb-2">
@@ -247,7 +255,7 @@ export default async function Page() {
         </div>
 
         {/* ================= 2. SUMMARY BOX ================= */}
-        <div className="bg-gray-900/40 p-6 md:p-8 rounded-[2rem] border border-gray-800/60 backdrop-blur-md text-center max-w-6xl mx-auto shadow-2xl">
+        <div className="bg-gray-900/40 p-6 md:p-9 rounded-[2rem] border border-gray-800/60 backdrop-blur-md text-center max-w-7xl mx-auto shadow-2xl">
             <p className="text-sm text-indigo-400/80 font-bold tracking-[0.2em] mb-4 uppercase">Market Overview</p>
             <p className="text-xl md:text-2xl text-gray-200 leading-relaxed font-medium">
                 "{aiData.summary}"
@@ -255,17 +263,22 @@ export default async function Page() {
         </div>
 
         {/* ================= 3. ASSET CARDS SECTION ================= */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-10">
             
             {[
-                { key: 'btc', label: 'Bitcoin', icon: '₿', symbol: 'BTC / USD', price: prices.btc },
-                { key: 'gold', label: 'Gold', icon: '🧈', symbol: 'XAU / USD', price: prices.gold }
+                { key: 'btc',    label: 'Bitcoin',    icon: '₿',  symbol: 'BTC / USD',  price: prices.btc    },
+                { key: 'gold',   label: 'Gold',       icon: '🧈', symbol: 'XAU / USD',  price: prices.gold   },
+                { key: 'oil',    label: 'Crude Oil',  icon: '🛢️', symbol: 'WTI / USD',  price: prices.oil    },
+                { key: 'silver', label: 'Silver',     icon: '🪙', symbol: 'XAG / USD',  price: prices.silver },
+                { key: 'sp500',  label: 'S&P 500',    icon: '📈', symbol: 'INDEX',      price: prices.sp500  },
+                { key: 'eurusd', label: 'EUR / USD', icon: '💶', symbol: 'FOREX',     price: prices.eurusd },
+          
             ].map((asset) => {
                 const assetData = aiData[asset.key as keyof typeof aiData];
                 const theme = getTheme(assetData.score);
                 
                 return (
-                    <div key={asset.key} className={`bg-gray-900/60 rounded-[2.5rem] p-10 border border-gray-800 ${theme.bgGlow} hover:border-gray-600 transition-all duration-500 group relative overflow-hidden shadow-2xl backdrop-blur-sm`}>
+                    <div key={asset.key} className={`bg-gray-900/60 rounded-[2.5rem] p-3 border border-gray-800 ${theme.bgGlow} hover:border-gray-600 transition-all duration-500 group relative overflow-hidden shadow-2xl backdrop-blur-sm`}>
                         
                         <div className="absolute -top-12 -right-12 text-[15rem] opacity-5 group-hover:opacity-10 transition-opacity duration-700 pointer-events-none">
                             {asset.icon}
